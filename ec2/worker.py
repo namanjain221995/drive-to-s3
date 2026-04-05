@@ -6,6 +6,7 @@ import urllib.request
 import urllib.error
 
 import boto3
+from botocore.exceptions import ClientError
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 
@@ -135,6 +136,17 @@ def build_s3_key(job):
     )
 
 
+def s3_object_exists(bucket, key):
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in {"404", "NotFound", "NoSuchKey"}:
+            return False
+        raise
+
+
 def stream_drive_file_to_s3_multipart(file_id, job, access_token):
     file_meta = get_drive_file_meta(file_id, access_token)
     mime_type = file_meta.get("mimeType") or "application/octet-stream"
@@ -191,15 +203,16 @@ def stream_drive_file_to_s3_multipart(file_id, job, access_token):
                 part_number += 1
 
         if not parts:
+            empty_part = s3.upload_part(
+                Bucket=S3_BUCKET,
+                Key=s3_key,
+                UploadId=upload_id,
+                PartNumber=1,
+                Body=b""
+            )
             parts.append({
                 "PartNumber": 1,
-                "ETag": s3.upload_part(
-                    Bucket=S3_BUCKET,
-                    Key=s3_key,
-                    UploadId=upload_id,
-                    PartNumber=1,
-                    Body=b""
-                )["ETag"]
+                "ETag": empty_part["ETag"]
             })
 
         s3.complete_multipart_upload(
@@ -246,8 +259,22 @@ def process_message(msg):
     if missing:
         raise RuntimeError(f"Missing required job fields: {', '.join(missing)}")
 
+    s3_key = build_s3_key(body)
+
+    if s3_object_exists(S3_BUCKET, s3_key):
+        logger.info(
+            "Skipping duplicate archive because object already exists: s3://%s/%s",
+            S3_BUCKET,
+            s3_key,
+        )
+        sqs.delete_message(
+            QueueUrl=ARCHIVE_QUEUE_URL,
+            ReceiptHandle=msg["ReceiptHandle"]
+        )
+        return
+
     access_token = get_google_access_token()
-    s3_key = stream_drive_file_to_s3_multipart(
+    uploaded_s3_key = stream_drive_file_to_s3_multipart(
         file_id=body["fileId"],
         job=body,
         access_token=access_token
@@ -257,7 +284,7 @@ def process_message(msg):
         QueueUrl=ARCHIVE_QUEUE_URL,
         ReceiptHandle=msg["ReceiptHandle"]
     )
-    logger.info("Deleted SQS message after success. s3_key=%s", s3_key)
+    logger.info("Deleted SQS message after success. s3_key=%s", uploaded_s3_key)
 
 
 def main():
