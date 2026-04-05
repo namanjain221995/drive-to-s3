@@ -1,0 +1,16 @@
+[Unit]
+Description=Drive to S3 archive worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/drive-to-s3.env
+WorkingDirectory=/opt/drive-to-s3
+ExecStart=/opt/drive-to-s3/venv/bin/python /opt/drive-to-s3/worker.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
