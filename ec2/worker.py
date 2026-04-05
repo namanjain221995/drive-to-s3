@@ -23,6 +23,7 @@ SERVICE_ACCOUNT_SECRET_KEY = os.environ.get("SERVICE_ACCOUNT_SECRET_KEY", "gdriv
 ARCHIVE_QUEUE_URL = os.environ["ARCHIVE_QUEUE_URL"]
 S3_BUCKET = os.environ["S3_BUCKET"]
 S3_PREFIX = os.environ.get("S3_PREFIX", "").strip("/")
+FILE_INDEX_PREFIX = os.environ.get("FILE_INDEX_PREFIX", "file-index").strip("/")
 INSTANCE_ID = os.environ["INSTANCE_ID"]
 
 IDLE_STOP_MINUTES = int(os.environ.get("IDLE_STOP_MINUTES", "10"))
@@ -136,6 +137,10 @@ def build_s3_key(job):
     )
 
 
+def build_index_key(file_id):
+    return join_s3_key(FILE_INDEX_PREFIX, f"{file_id}.json")
+
+
 def s3_object_exists(bucket, key):
     try:
         s3.head_object(Bucket=bucket, Key=key)
@@ -145,6 +150,28 @@ def s3_object_exists(bucket, key):
         if code in {"404", "NotFound", "NoSuchKey"}:
             return False
         raise
+
+
+def write_file_index(file_id, job, s3_key):
+    index_key = build_index_key(file_id)
+    payload = {
+        "fileId": file_id,
+        "s3Bucket": S3_BUCKET,
+        "s3Key": s3_key,
+        "rootFolder": job["rootFolder"],
+        "slotFolder": job["slotFolder"],
+        "candidateFolder": job["candidateFolder"],
+        "deliverableFolder": job["deliverableFolder"],
+        "finalFileName": job["finalFileName"],
+        "updatedAtEpoch": int(time.time())
+    }
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=index_key,
+        Body=json.dumps(payload).encode("utf-8"),
+        ContentType="application/json"
+    )
+    logger.info("Wrote file index: s3://%s/%s", S3_BUCKET, index_key)
 
 
 def stream_drive_file_to_s3_multipart(file_id, job, access_token):
@@ -267,6 +294,7 @@ def process_message(msg):
             S3_BUCKET,
             s3_key,
         )
+        write_file_index(body["fileId"], body, s3_key)
         sqs.delete_message(
             QueueUrl=ARCHIVE_QUEUE_URL,
             ReceiptHandle=msg["ReceiptHandle"]
@@ -279,6 +307,8 @@ def process_message(msg):
         job=body,
         access_token=access_token
     )
+
+    write_file_index(body["fileId"], body, uploaded_s3_key)
 
     sqs.delete_message(
         QueueUrl=ARCHIVE_QUEUE_URL,
